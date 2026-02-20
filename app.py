@@ -13,6 +13,7 @@ import os
 app = Flask(__name__)
 
 
+print("Loading environment variables...")
 load_dotenv()
 
 PINECONE_API_KEY=os.environ.get('PINECONE_API_KEY')
@@ -21,19 +22,18 @@ GROQ_API_KEY=os.environ.get('GROQ_API_KEY')
 os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
 
-
+print("Downloading embeddings...")
 embeddings = download_hugging_face_embeddings()
 
 index_name = "doctor-bot" 
+print(f"Connecting to Pinecone index: {index_name}")
 # Embed each chunk and upsert the embeddings into your Pinecone index.
 docsearch = PineconeVectorStore.from_existing_index(
     index_name=index_name,
     embedding=embeddings
 )
 
-
-
-
+print("Setting up retriever and chat model...")
 retriever = docsearch.as_retriever(search_type="similarity", search_kwargs={"k":3})
 
 chatModel = ChatGroq(model="llama-3.3-70b-versatile")
@@ -44,8 +44,10 @@ prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
+print("Creating RAG chain...")
 question_answer_chain = create_stuff_documents_chain(chatModel, prompt)
 rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+print("Initialization complete.")
 
 
 
@@ -67,4 +69,5 @@ def chat():
 
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port= 8080, debug= True)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=True)
