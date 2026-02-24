@@ -1,89 +1,58 @@
-name: Deploy Application Docker Image to EC2 instance
+name: Deploy to EC2 
 
 on:
   push:
-    branches: [main]
-
+    branches:
+      - main
 
 jobs:
-  Continuous-Integration:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v2
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+            APP_NAME="drbuddy-app"
+            CONTAINER_NAME="drbuddy-app-container"
+            PROJECT_DIR="/home/ec2-user/DrBuddy"
 
-      - name: Create ECR Repository if it doesn't exist
-        env:
-          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
-        run: |
-          aws ecr describe-repositories --repository-names $ECR_REPOSITORY || \
-          aws ecr create-repository --repository-name $ECR_REPOSITORY
+            echo "Removing old project directory"
+            rm -rf $PROJECT_DIR
 
-      - name: Build, tag, and push image to Amazon ECR
-        id: build-image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
-          IMAGE_TAG: latest
-        run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .  
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+            echo "Cloning fresh repository"
+            git clone -b main https://${{ secrets.PAT_GITHUB }}@github.com/akshitverma317/DrBuddy.git $PROJECT_DIR
 
-  Continuous-Deployment:
-    needs: Continuous-Integration
-    runs-on: self-hosted
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+            cd $PROJECT_DIR
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+            echo "Stopping and removing old container if exists"
+            sudo docker stop $CONTAINER_NAME || true
+            sudo docker rm $CONTAINER_NAME || true
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+            echo "Removing old image (optional)"
+            sudo docker rmi $APP_NAME || true
 
-      - name: Stop and remove old containers
-        run: |
-          docker stop $(docker ps -q) 2>/dev/null || true
-          docker rm $(docker ps -a -q) 2>/dev/null || true
+            echo "Building new Docker image"
+            sudo docker build -t $APP_NAME .
 
-      - name: Clean up old Docker resources
-        run: |
-          docker container prune -f
-          docker image prune -a -f
-          docker builder prune -f
-          docker volume prune -f
+            echo "Running new container"
+            sudo docker run -d \
+              --name $CONTAINER_NAME \
+              -p 5000:5000 \
+              -e AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+              -e AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+              -e AWS_DEFAULT_REGION="${{ secrets.AWS_DEFAULT_REGION }}" \
+              -e PINECONE_API_KEY="${{ secrets.PINECONE_API_KEY }}" \
+              -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+              $APP_NAME
 
-      - name: Pull latest Docker image
-        run: |
-          docker pull "${{ steps.login-ecr.outputs.registry }}"/"${{ secrets.ECR_REPO }}":latest
-
-      - name: Run Docker Image to serve users
-        run: |
-          docker run -d \
-            -e AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
-            -e AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
-            -e AWS_DEFAULT_REGION="${{ secrets.AWS_DEFAULT_REGION }}" \
-            -e PINECONE_API_KEY="${{ secrets.PINECONE_API_KEY }}" \
-            -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
-            -p 8080:8080 \
-            --restart unless-stopped \
-            "${{ steps.login-ecr.outputs.registry }}"/"${{ secrets.ECR_REPO }}":latest
+            echo "Deployment completed successfully"
